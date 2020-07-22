@@ -1,0 +1,31 @@
+{
+  "name": "@maxvandelaar/homey-community-store-cli",
+  "version": "0.0.1",
+  "description": "CLI tool to upload apps to the Homey Community Store",
+  "main": "src/index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "bin": {
+    "hcs": "bin/hcs-cli"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "aws-sdk": "^2.698.0",
+    "esm": "^3.2.25",
+    "inquirer": "^7.1.0",
+    "keytar": "^6.0.1",
+    "mime-types": "^2.1.27",
+    "tar": "^6.0.2",
+    "yargs": "^15.3.1"
+  },
+  "keywords": [
+    "cli",
+    "homey",
+    "homey community store"
+  ]
+}
