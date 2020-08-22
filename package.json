@@ -1,31 +1,41 @@
 {
   "name": "@maxvandelaar/homey-community-store-cli",
-  "version": "0.0.1",
-  "description": "CLI tool to upload apps to the Homey Community Store",
+  "version": "2.0.0",
+  "description": "CLI tool to upload apps to the Homey Community Store. Run 'hcs' to understand how to use it.",
   "main": "src/index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
   "bin": {
     "hcs": "bin/hcs-cli"
   },
+  "author": "Max van de Laar",
+  "license": "GPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/MaxvandeLaar/homey-community-store-cli"
+  },
+  "homepage": "https://github.com/MaxvandeLaar/homey-community-store-cli",
+  "bugs": {
+    "url": "https://github.com/MaxvandeLaar/homey-community-store-cli/issues"
+  },
+  "private": false,
   "publishConfig": {
     "access": "public"
   },
-  "author": "",
-  "license": "ISC",
   "dependencies": {
     "aws-sdk": "^2.698.0",
+    "aws4": "^1.10.1",
+    "axios": "^0.20.0",
     "esm": "^3.2.25",
     "inquirer": "^7.1.0",
     "keytar": "^6.0.1",
     "mime-types": "^2.1.27",
+    "slash": "^3.0.0",
     "tar": "^6.0.2",
     "yargs": "^15.3.1"
   },
   "keywords": [
     "cli",
     "homey",
+    "hcs-cli",
     "homey community store"
   ]
 }

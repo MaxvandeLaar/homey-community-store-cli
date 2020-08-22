@@ -8,14 +8,27 @@ import path from 'path';
 import mime from 'mime-types';
 import keytar from 'keytar';
 import yargs from 'yargs';
+import slash from 'slash';
+import aws4 from 'aws4';
+import axios from 'axios';
 
-function parseArgumentsIntoOptions(rawArgs) {
+function parseArgumentsIntoOptions() {
   return yargs
     .usage('Usage: hcs <command> [options]')
-    .command('build', 'Create a tar.gz file for the app', build)
-    .command('publish', 'Build the app and upload it to the Homey Community Store', publish)
-    .demandCommand(1, 'You need to enter at least one command')
+    .command('build', 'Create a tar.gz file for the app', (yargs) => {
+      return yargs.option('latest', {
+        type: 'boolean',
+        description: 'Version will be replaced by \'latest\' instead of what is in the app.json. Do NOT use this unless you know what you are doing!'
+      })
+    }, build)
+    .command('publish', 'Build the app and upload it to the Homey Community Store', (yargs) => {
+      return yargs;
+    },  publish)
+    .command('logout', 'Remove all credentials', (yargs) => {
+      return yargs
+    }, logout)
     .help()
+    .demandCommand(1, 'You need to enter at least one command')
     .argv;
 }
 
@@ -27,7 +40,7 @@ async function promptForAccessKeyId() {
     message: 'Please provide your access key id'
   });
   const answers = await inquirer.prompt(questions);
-  return {accessKey: answers.accessKeyId};
+  return answers.accessKeyId;
 }
 
 async function promptForAccessKeySecret() {
@@ -38,7 +51,7 @@ async function promptForAccessKeySecret() {
     message: 'Please provide your access key secret'
   });
   const answers = await inquirer.prompt(questions);
-  return {accessKey: answers.accessKeySecret};
+  return answers.accessKeySecret;
 }
 
 function determineCategory(appInfo) {
@@ -48,9 +61,13 @@ function determineCategory(appInfo) {
   return Array.isArray(appInfo.category) ? appInfo.category : [appInfo.category];
 }
 
-function createTar(appInfo) {
+function createTar(appInfo, argv) {
   return new Promise((resolve, reject) => {
-    const tarFile = `${appInfo.id}-v${appInfo.version}.tar.gz`;
+    let version = `v${appInfo.version}`;
+    if (argv.latest) {
+      version = 'latest';
+    }
+    const tarFile = `${appInfo.id}-${version}.tar.gz`;
     tar.c({
       gzip: true,
       file: tarFile,
@@ -65,7 +82,7 @@ function createTar(appInfo) {
         }
         return true;
       }
-    }, [`./`]).then((result) => {
+    }, [`./`]).then((_result) => {
       const hash = crypto.createHash('sha1');
       const readStream = fs.createReadStream(`${cwd()}/${tarFile}`);
       readStream.on('error', reject);
@@ -120,9 +137,9 @@ function uploadToS3(s3Path, bucketName, root) {
     });
   }
 
-  walkSync(s3Path, (filePath, stat) => {
+  walkSync(s3Path, (filePath, _stat) => {
     const bucketPath = filePath;
-    const key = root + bucketPath.split(s3Path)[1];
+    const key = slash(root + bucketPath.split(s3Path)[1]).replace(/\\/g, '/');
     if (!['.svg', '.png', '.jpeg', '.jpg', '.gz'].includes(path.extname(filePath)) || filePath.includes('node_modules') || filePath.includes('.github')) {
       return;
     }
@@ -134,98 +151,22 @@ function uploadToS3(s3Path, bucketName, root) {
       Key: key,
       Body: fs.readFileSync(filePath)
     };
-    s3.putObject(params, function (err, data) {
+    s3.putObject(params, function (err, _data) {
       if (err) {
         console.log(err)
       } else {
-        console.log('Successfully uploaded ' + bucketPath + ' to ' + bucketName);
+        console.log('Successfully uploaded ' + bucketPath + ' to ' + bucketName + ' as ' + key);
       }
     });
   });
 }
 
-function putAppDB(app) {
-  const DB = new AWS.DynamoDB();
-  const marshalled = AWS.DynamoDB.Converter.marshall(app);
-  const params = {
-    Item: marshalled,
-    ReturnConsumedCapacity: "TOTAL",
-    TableName: "HomeyCommunityStore"
-  };
-  return DB.putItem(params).promise();
-}
-
-function updateAppDB(app, version) {
-  const DB = new AWS.DynamoDB.DocumentClient();
-  let changelog = '';
-  let ExpressionAttributeNames = {
-    '#versions': 'versions',
-    '#modified': 'modified'
-  };
-
-  let ExpressionAttributeValues = {
-    ':version': [version],
-    ':modified': Date.now(),
-    ':empty_list': []
-  }
-
-  if (version.changelog) {
-    changelog = ', #changelog = :changelog';
-    ExpressionAttributeNames = {
-      ...ExpressionAttributeNames,
-      '#changelog': 'changelog'
-    };
-    ExpressionAttributeValues = {
-      ...ExpressionAttributeValues,
-      ':changelog': version.changelog
-    };
-  }
-
-  return DB.update({
-    TableName: 'HomeyCommunityStore',
-    Key: {
-      id: app.id
-    },
-    ReturnValues: 'ALL_NEW',
-    UpdateExpression: 'set #versions = list_append(if_not_exists(#versions, :empty_list), :version), #modified = :modified' + changelog,
-    ExpressionAttributeNames,
-    ExpressionAttributeValues
-  }).promise()
-}
-
-function getExistingApp(dynamoDB, app) {
-  const params = {
-    TableName: "HomeyCommunityStore",
-    Key: {
-      id: {
-        S: app.id
-      }
-    }
-  };
-  return new Promise((resolve, reject) => {
-    dynamoDB.getItem(params, function (err, data) {
-      if (err) {
-        return reject(err);
-      }
-
-      if (Object.keys(data).length < 1) {
-        return resolve({new: true});
-      }
-      if (data.Item) {
-        return resolve({new: false, item: AWS.DynamoDB.Converter.unmarshall(data.Item)});
-      } else {
-        reject();
-      }
-    });
-  });
-}
-
-async function build() {
+async function build(argv) {
   console.log('Building the app');
   let tar = {};
   try {
     const appInfo = require(`${cwd()}/app.json`);
-    tar = await createTar(appInfo);
+    tar = await createTar(appInfo, argv);
   } catch (e) {
     console.error(e);
     return;
@@ -243,18 +184,27 @@ function getCredentials(account) {
 
 function setCredentials(account, password) {
   return new Promise((resolve, reject) => {
-    keytar.setPassword('hcs-cli', account, password).then((result) => {
+    keytar.setPassword('hcs-cli', account, password).then((_result) => {
       resolve(true);
     }).catch(reject);
   });
 }
 
-async function publish() {
+async function logout(_argv) {
+  const allCreds = await keytar.findCredentials('hcs-cli');
+  const promises = allCreds.map(async creds => {
+    await keytar.deletePassword('hcs-cli', creds.account);
+  });
+  await Promise.allSettled(promises);
+  console.log('You have been signed out');
+}
+
+async function publish(argv) {
   let appInfo = {};
   let tar = {};
   try {
     appInfo = require(`${cwd()}/app.json`);
-    tar = await createTar(appInfo);
+    tar = await createTar(appInfo, argv);
   } catch (e) {
     console.error(e);
     return;
@@ -357,73 +307,75 @@ async function publish() {
 
   app.versions[0].locales = locales;
 
-  const accessKeyId = await promptForAccessKeyId();
-
-  let accessKeySecure = await getCredentials(accessKeyId).catch(console.error);
-  if (!accessKeySecure) {
-    console.error('Please provide your access key id');
-    return;
+  const creds = await keytar.findCredentials('hcs-cli').catch(console.error);
+  let accessKeyId;
+  let accessKeySecure;
+  if (creds && creds.length === 1) {
+    accessKeyId = creds[0].account;
+    accessKeySecure = creds[0].password;
+  } else {
+    accessKeyId = await promptForAccessKeyId();
+    accessKeySecure = await getCredentials(accessKeyId).catch(console.error);
   }
 
   if (accessKeySecure === false) {
     //ask for credentials;
-    const creds = await promptForAccessKeySecret();
-    if (creds.accessKeySecret) {
-      const success = await setCredentials(accessKeyId, creds.accessKey).catch(console.error);
+    const accessKeySecret = await promptForAccessKeySecret();
+    if (accessKeySecret) {
+      const success = await setCredentials(accessKeyId, accessKeySecret).catch(console.error);
       if (!success) {
         console.log('Something went wrong storing your credentials');
         return;
       }
-      accessKeySecure = creds.accessKey;
     } else {
       return;
     }
+    accessKeySecure = accessKeySecret;
   }
 
   AWS.config = new AWS.Config({
     region: 'eu-central-1',
-    accessKeyId: accessKeySecure,
-    secretAccessKey: accessKeyId
+    accessKeyId: accessKeyId,
+    secretAccessKey: accessKeySecure
   });
 
-  const dynamoDB = new AWS.DynamoDB();
-  let dbCheck;
-  try {
-    dbCheck = await getExistingApp(dynamoDB, app);
-  } catch (e) {
-    console.error(e);
-    return;
+  const request = {
+    host: '4c23v5xwtc.execute-api.eu-central-1.amazonaws.com',
+    method: 'POST',
+    url: `https://4c23v5xwtc.execute-api.eu-central-1.amazonaws.com/staging/apps/publish`,
+    data: app, // object describing the foo
+    body: JSON.stringify(app), // aws4 looks for body; axios for data
+    path: `/staging/apps/publish`,
+    headers: {
+      'content-type': 'application/json'
+    }
   }
 
-  if (dbCheck.new) {
-    //Add app to DynamoDB
-    try {
-      await putAppDB(app);
-    } catch (e) {
-      console.error(e);
+  const signedRequest = aws4.sign(request,
+    {
+      // assumes user has authenticated and we have called
+      // AWS.config.credentials.get to retrieve keys and
+      // session tokens
+      secretAccessKey: AWS.config.credentials.secretAccessKey,
+      accessKeyId: AWS.config.credentials.accessKeyId
+    })
+
+  delete signedRequest.headers['Host']
+  delete signedRequest.headers['Content-Length']
+
+  const response = await axios(signedRequest).catch(console.error);
+
+  if (response && response.data && response.data.body) {
+    const {success, msg} = response.data.body;
+    if (!success) {
+      console.error(msg);
       return;
     }
+    console.log(msg);
+    //PUSH TAR FILE AND IMAGES TO S3!
+    uploadToS3(cwd(), 'homey-community-store', `${app.id}/${appInfo.version}`);
   } else {
-    //Update APP
-    let versionExists = false;
-    dbCheck.item.versions.forEach((version) => {
-      if (version.version === appInfo.version) {
-        versionExists = true;
-      }
-    });
-
-    if (versionExists) {
-      console.log('This version already exists in the store!');
-      return;
-    }
-    try {
-      await updateAppDB(dbCheck.item, app.versions[0]);
-    } catch (e) {
-      console.error(e);
-      return;
-    }
+    console.error('Failed pushing to the DB');
   }
 
-  //PUSH TAR FILE AND IMAGES TO S3!
-  uploadToS3(cwd(), 'homey-community-store', `${app.id}/${appInfo.version}`);
 }
