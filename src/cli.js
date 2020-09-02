@@ -11,6 +11,11 @@ import yargs from 'yargs';
 import slash from 'slash';
 import aws4 from 'aws4';
 import axios from 'axios';
+import chalk from 'chalk';
+
+const log = console.log;
+const error = console.error;
+const {blue, green, gray, red} = chalk;
 
 function parseArgumentsIntoOptions() {
   return yargs
@@ -22,8 +27,11 @@ function parseArgumentsIntoOptions() {
       })
     }, build)
     .command('publish', 'Build the app and upload it to the Homey Community Store', (yargs) => {
-      return yargs;
-    },  publish)
+      return yargs.option('force', {
+        type: 'boolean',
+        description: 'CAUTION: This will override the version if it already exists in the database!'
+      });
+    }, publish)
     .command('logout', 'Remove all credentials', (yargs) => {
       return yargs
     }, logout)
@@ -62,12 +70,14 @@ function determineCategory(appInfo) {
 }
 
 function createTar(appInfo, argv) {
+  log(gray('Process for creating the tar.gz file'));
   return new Promise((resolve, reject) => {
     let version = `v${appInfo.version}`;
     if (argv.latest) {
       version = 'latest';
     }
     const tarFile = `${appInfo.id}-${version}.tar.gz`;
+    log(gray(`Filename determined: '${tarFile}'`));
     tar.c({
       gzip: true,
       file: tarFile,
@@ -122,56 +132,70 @@ export async function cli(args) {
   parseArgumentsIntoOptions(args);
 }
 
-function uploadToS3(s3Path, bucketName, root) {
-  let s3 = new AWS.S3();
+async function uploadToS3(s3Path, bucketName, root) {
+  return new Promise(async resolve => {
+    log(gray('Upload assets to S3'));
+    let s3 = new AWS.S3();
 
-  function walkSync(currentDirPath, callback) {
-    fs.readdirSync(currentDirPath).forEach((name) => {
-      const filePath = path.join(currentDirPath, name);
-      const stat = fs.statSync(filePath);
-      if (stat.isFile()) {
-        callback(filePath, stat);
-      } else if (stat.isDirectory()) {
-        walkSync(filePath, callback);
-      }
-    });
-  }
-
-  walkSync(s3Path, (filePath, _stat) => {
-    const bucketPath = filePath;
-    const key = slash(root + bucketPath.split(s3Path)[1]).replace(/\\/g, '/');
-    if (!['.svg', '.png', '.jpeg', '.jpg', '.gz'].includes(path.extname(filePath)) || filePath.includes('node_modules') || filePath.includes('.github')) {
-      return;
+    const overall = [];
+    async function walkSync(currentDirPath, callback) {
+        const promises = fs.readdirSync(currentDirPath).map((name) => {
+          return new Promise(async (resolveMap) => {
+            const filePath = path.join(currentDirPath, name);
+            const stat = fs.statSync(filePath);
+            if (stat.isFile()) {
+              await callback(filePath, stat);
+              resolveMap();
+            } else if (stat.isDirectory()) {
+              await walkSync(filePath, callback);
+              resolveMap();
+            }
+          });
+        });
+        overall.push(...promises);
     }
-    const contentType = mime.contentType(path.extname(bucketPath));
-    let params = {
-      Bucket: bucketName,
-      ACL: 'public-read',
-      ContentType: contentType,
-      Key: key,
-      Body: fs.readFileSync(filePath)
-    };
-    s3.putObject(params, function (err, _data) {
-      if (err) {
-        console.log(err)
-      } else {
-        console.log('Successfully uploaded ' + bucketPath + ' to ' + bucketName + ' as ' + key);
-      }
+
+    await walkSync(s3Path, (filePath, _stat) => {
+      return new Promise(async (resolveWalk, rejectWalk) => {
+        const bucketPath = filePath;
+        const key = slash(root + bucketPath.split(s3Path)[1]).replace(/\\/g, '/');
+        if (!['.svg', '.png', '.jpeg', '.jpg', '.gz'].includes(path.extname(filePath)) || filePath.includes('node_modules') || filePath.includes('.github')) {
+          return resolveWalk();
+        }
+        const contentType = mime.contentType(path.extname(bucketPath));
+        const params = {
+          Bucket: bucketName,
+          ACL: 'public-read',
+          ContentType: contentType,
+          Key: key,
+          Body: fs.readFileSync(filePath)
+        };
+        const success = await s3.putObject(params).promise().catch(rejectWalk);
+        if (!success) {
+          return error(red(`Could not upload ${key}`));
+        }
+        log(gray('Successfully uploaded ' + bucketPath + ' to ' + bucketName + ' as ' + key));
+        resolveWalk();
+      });
     });
+
+    resolve(overall);
   });
 }
 
 async function build(argv) {
-  console.log('Building the app');
+  log(blue('Building the app'));
   let tar = {};
+  let appInfo = {};
   try {
-    const appInfo = require(`${cwd()}/app.json`);
+    log(gray(`Loading '${cwd()}/app.json'`));
+    appInfo = require(`${cwd()}/app.json`);
     tar = await createTar(appInfo, argv);
+    log(gray(`${tar.filename} created successfully`));
   } catch (e) {
-    console.error(e);
-    return;
+    error(red(e));
   }
-  console.log(`Build finished: ${cwd()}/${tar.filename}`)
+  log(green(`Build finished: ${cwd()}/${tar.filename}`));
 }
 
 function getCredentials(account) {
@@ -196,31 +220,37 @@ async function logout(_argv) {
     await keytar.deletePassword('hcs-cli', creds.account);
   });
   await Promise.allSettled(promises);
-  console.log('You have been signed out');
+  log(green('You have been signed out'));
 }
 
 async function publish(argv) {
+  log(blue('Publishing the app'));
   let appInfo = {};
   let tar = {};
+  const force = !!argv.force;
   try {
+    log(gray(`Loading '${cwd()}/app.json'`));
     appInfo = require(`${cwd()}/app.json`);
     tar = await createTar(appInfo, argv);
+    log(gray(`${tar.filename} created successfully`));
   } catch (e) {
-    console.error(e);
+    error(red(e));
     return;
   }
 
+  log(gray('Process the app.json'));
+  const timestamp = Date.now();
   let app = {
     id: appInfo.id,
-    added: Date.now(),
-    modified: Date.now(),
+    added: timestamp,
+    modified: timestamp,
     versions: [{
       id: appInfo.id,
       summary: appInfo.description,
       hash: tar.hash,
       filename: tar.filename,
-      added: Date.now(),
-      modified: Date.now(),
+      added: timestamp,
+      modified: timestamp,
       sdk: appInfo.sdk,
       version: appInfo.version,
       compatibility: appInfo.compatibility,
@@ -251,20 +281,25 @@ async function publish(argv) {
     }]
   };
 
+  log(gray('Look for ./homeychangelog.json'));
   if (fs.existsSync(`${cwd()}/.homeychangelog.json`)) {
+    log(gray('Changelog found, adding it to the app'))
     app.changelog = require(`${cwd()}/.homeychangelog.json`);
     app.versions[0].changelog = require(`${cwd()}/.homeychangelog.json`);
   }
 
+  log(gray(`Processing locales`));
   const locales = {};
   const appVersion = app.versions[0];
   if (appVersion.name) {
+    log(gray(`Processing locales from the name: ${Object.keys(appVersion.name).join(', ')}`));
     Object.keys(appVersion.name).forEach(lang => {
       locales[lang] = {name: appVersion.name[lang]}
     });
   }
 
   if (appVersion.summary) {
+    log(gray(`Processing locales from the summary for the description: ${Object.keys(appVersion.name).join(', ')}`));
     Object.keys(appVersion.summary).forEach(lang => {
       locales[lang] = {
         ...locales[lang],
@@ -274,6 +309,7 @@ async function publish(argv) {
   }
 
   if (appVersion.description) {
+    log(gray(`Processing locales from the description for the description: ${Object.keys(appVersion.name).join(', ')}`));
     Object.keys(appVersion.description).forEach(lang => {
       locales[lang] = {
         ...locales[lang],
@@ -283,6 +319,7 @@ async function publish(argv) {
   }
 
   if (appVersion.tags) {
+    log(gray(`Processing locales from the tags: ${Object.keys(appVersion.name).join(', ')}`));
     Object.keys(appVersion.tags).forEach(lang => {
       locales[lang] = {
         ...locales[lang],
@@ -290,9 +327,10 @@ async function publish(argv) {
       }
     });
   }
-  if (appVersion.changelog) {
 
+  if (appVersion.changelog) {
     Object.keys(appVersion.changelog).forEach(version => {
+      log(gray(`Processing locales from the changelog ${version}: ${Object.keys(appVersion.changelog[version]).join(', ')}`));
       Object.keys(appVersion.changelog[version]).forEach(lang => {
         if (!locales[lang]) {
           locales[lang] = {};
@@ -307,24 +345,27 @@ async function publish(argv) {
 
   app.versions[0].locales = locales;
 
-  const creds = await keytar.findCredentials('hcs-cli').catch(console.error);
+  log(gray('Looking for credentials'));
+  const creds = await keytar.findCredentials('hcs-cli').catch(err => error(red(err)));
   let accessKeyId;
   let accessKeySecure;
   if (creds && creds.length === 1) {
     accessKeyId = creds[0].account;
     accessKeySecure = creds[0].password;
   } else {
+    log(blue('Credentials not found, please sign in'));
     accessKeyId = await promptForAccessKeyId();
-    accessKeySecure = await getCredentials(accessKeyId).catch(console.error);
+    accessKeySecure = await getCredentials(accessKeyId).catch(err => error(red(err)));
   }
 
   if (accessKeySecure === false) {
     //ask for credentials;
+    log(blue('Password not found, please sign in'));
     const accessKeySecret = await promptForAccessKeySecret();
     if (accessKeySecret) {
-      const success = await setCredentials(accessKeyId, accessKeySecret).catch(console.error);
+      const success = await setCredentials(accessKeyId, accessKeySecret).catch(err => error(red(err)));
       if (!success) {
-        console.log('Something went wrong storing your credentials');
+        error(red('Something went wrong storing your credentials'));
         return;
       }
     } else {
@@ -333,6 +374,7 @@ async function publish(argv) {
     accessKeySecure = accessKeySecret;
   }
 
+  log(gray('Creating the AWS Config'));
   AWS.config = new AWS.Config({
     region: 'eu-central-1',
     accessKeyId: accessKeyId,
@@ -342,40 +384,52 @@ async function publish(argv) {
   const request = {
     host: '4c23v5xwtc.execute-api.eu-central-1.amazonaws.com',
     method: 'POST',
-    url: `https://4c23v5xwtc.execute-api.eu-central-1.amazonaws.com/staging/apps/publish`,
-    data: app, // object describing the foo
-    body: JSON.stringify(app), // aws4 looks for body; axios for data
-    path: `/staging/apps/publish`,
+    url: `https://4c23v5xwtc.execute-api.eu-central-1.amazonaws.com/production/apps/publish`,
+    data: {app, force}, // object describing the foo
+    body: JSON.stringify({app, force}), // aws4 looks for body; axios for data
+    path: `/production/apps/publish`,
     headers: {
       'content-type': 'application/json'
     }
   }
+  log(gray(`Preparing request to the API ${request.url}`));
 
   const signedRequest = aws4.sign(request,
     {
-      // assumes user has authenticated and we have called
-      // AWS.config.credentials.get to retrieve keys and
-      // session tokens
       secretAccessKey: AWS.config.credentials.secretAccessKey,
       accessKeyId: AWS.config.credentials.accessKeyId
     })
 
-  delete signedRequest.headers['Host']
-  delete signedRequest.headers['Content-Length']
+  delete signedRequest.headers['Host'];
+  delete signedRequest.headers['Content-Length'];
 
-  const response = await axios(signedRequest).catch(console.error);
-
+  log(gray(`Send request to the API ${request.url}`));
+  const response = await axios(signedRequest).catch(err => error(red(err)));
   if (response && response.data && response.data.body) {
     const {success, msg} = response.data.body;
     if (!success) {
-      console.error(msg);
+      error(red(msg));
       return;
     }
-    console.log(msg);
-    //PUSH TAR FILE AND IMAGES TO S3!
-    uploadToS3(cwd(), 'homey-community-store', `${app.id}/${appInfo.version}`);
-  } else {
-    console.error('Failed pushing to the DB');
-  }
+    log(gray(msg));
 
+    const uploadPromise = uploadToS3(cwd(), 'homey-community-store', `${app.id}/${appInfo.version}`);
+    const filePromises = await uploadPromise;
+    if (filePromises){
+      let errors;
+      await Promise.allSettled(filePromises).catch(err => errors = err);
+      if (errors) {
+        log(red('Failed to push an asset to the S3 storage. Failed to publish the app. Please contact the HCS admin'));
+      } else {
+        log(green('Successfully published the app to the Homey Community Store.'));
+      }
+    } else {
+      error(red('FAILED TO PUBLISH'));
+    }
+
+
+  } else {
+    error(red('Failed pushing to the DB'));
+    error(red(response.statusText));
+  }
 }
