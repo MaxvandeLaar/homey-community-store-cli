@@ -12,6 +12,7 @@ import slash from 'slash';
 import aws4 from 'aws4';
 import axios from 'axios';
 import chalk from 'chalk';
+import {exec} from 'child_process';
 
 const log = console.log;
 const error = console.error;
@@ -30,6 +31,9 @@ function parseArgumentsIntoOptions() {
       return yargs.option('force', {
         type: 'boolean',
         description: 'CAUTION: This will override the version if it already exists in the database!'
+      }).option('keep', {
+        type: 'boolean',
+        description: 'Prevents removal of the tar.gz file.'
       });
     }, publish)
     .command('logout', 'Remove all credentials', (yargs) => {
@@ -69,15 +73,26 @@ function determineCategory(appInfo) {
   return Array.isArray(appInfo.category) ? appInfo.category : [appInfo.category];
 }
 
+function pruneDev(){
+  return new Promise((resolve) => {
+    log(gray('Pruning development dependencies'));
+    exec('npm prune --production', (err, stdout, stderr) => {
+      log(gray('Finished pruning development dependencies'));
+      resolve();
+    });
+  });
+}
+
 function createTar(appInfo, argv) {
   log(gray('Process for creating the tar.gz file'));
-  return new Promise((resolve, reject) => {
+  return new Promise(async (resolve, reject) => {
     let version = `v${appInfo.version}`;
     if (argv.latest) {
       version = 'latest';
     }
     const tarFile = `${appInfo.id}-${version}.tar.gz`;
     log(gray(`Filename determined: '${tarFile}'`));
+    await pruneDev();
     tar.c({
       gzip: true,
       file: tarFile,
@@ -421,6 +436,10 @@ async function publish(argv) {
       if (errors) {
         log(red('Failed to push an asset to the S3 storage. Failed to publish the app. Please contact the HCS admin'));
       } else {
+        if (!argv.keep) {
+          log(gray('Cleaning up'));
+          fs.unlinkSync(`./${tar.filename}`);
+        }
         log(green('Successfully published the app to the Homey Community Store.'));
       }
     } else {

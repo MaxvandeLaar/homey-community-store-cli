@@ -1,6 +1,6 @@
 {
   "name": "@maxvandelaar/homey-community-store-cli",
-  "version": "2.1.1",
+  "version": "2.2.0",
   "description": "CLI tool to upload apps to the Homey Community Store. Run 'hcs' to understand how to use it.",
   "main": "src/index.js",
   "bin": {
